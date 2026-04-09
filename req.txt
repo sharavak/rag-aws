@@ -6,5 +6,5 @@ faiss-cpu
 python-dotenv
 pypdf 
 docx2txt
-langchain-classic
+langchain_classic
 langchain-google-genai
