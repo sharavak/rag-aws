@@ -71,7 +71,7 @@ Query: {query}
 def build_retrievers(chunks):
 
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
+        model="gemini-embedding-001",
         google_api_key=os.getenv("GOOGLE_API_KEY")
     )
 
@@ -122,7 +122,7 @@ Answer in 2-3 sentences.
 @st.cache_resource
 def get_llm():
     return ChatGroq(
-        model="llama-3.1-70b-versatile",
+        model="llama-3.3-70b-versatile",
         groq_api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.3
     )
