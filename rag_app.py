@@ -5,23 +5,17 @@ import streamlit as st
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.retrievers import BM25Retriever
-from langchain_classic.retrievers import EnsembleRetriever
 
 from langchain_groq import ChatGroq
-
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-st.set_page_config(page_title="Hybrid RAG App (Groq + Gemini)", layout="wide")
-
-st.title("Hybrid RAG Chatbot (Groq + Gemini Embeddings + FAISS + BM25)")
-st.write("Upload a document and ask questions!")
+st.set_page_config(page_title="Standard RAG App", layout="wide")
+st.title("RAG Chatbot (FAISS + Gemini Embeddings + Groq)")
 
 
 def load_document(uploaded_file):
@@ -32,13 +26,10 @@ def load_document(uploaded_file):
 
     if uploaded_file.name.endswith(".txt"):
         loader = TextLoader(file_path, encoding="utf-8")
-
     elif uploaded_file.name.endswith(".pdf"):
         loader = PyPDFLoader(file_path)
-
     elif uploaded_file.name.endswith(".docx"):
         loader = Docx2txtLoader(file_path)
-
     else:
         st.error("Unsupported file type!")
         return []
@@ -48,48 +39,48 @@ def load_document(uploaded_file):
 
 def chunk_documents(documents):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
+        chunk_size=300,
+        chunk_overlap=30
     )
     return splitter.split_documents(documents)
 
 
-def rewrite_query(query, llm):
-    prompt = ChatPromptTemplate.from_template("""
-Rewrite the query for better retrieval.
-Add synonyms and detail.
-Return only the improved query.
 
-Query: {query}
-""")
-
-    chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"query": query})
-
-
-@st.cache_resource
-def build_retrievers(chunks):
-
+def build_vectorstore(chunks):
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="gemini-embedding-001",
+        model="gemini-embedding-2-preview",
         google_api_key=os.getenv("GOOGLE_API_KEY")
     )
 
-    faiss = FAISS.from_documents(chunks, embeddings)
-    faiss_retriever = faiss.as_retriever(search_kwargs={"k": 5})
+    texts = [doc.page_content for doc in chunks]
 
-    bm25 = BM25Retriever.from_documents(chunks)
-    bm25.k = 5
+    all_embeddings = []
+    batch_size = 20
 
-    hybrid = EnsembleRetriever(
-        retrievers=[faiss_retriever, bm25],
-        weights=[0.5, 0.5]
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        emb = embeddings.embed_documents(batch)
+        all_embeddings.extend(emb)
+
+    text_embedding_pairs = list(zip(texts, all_embeddings))
+
+    return FAISS.from_embeddings(text_embedding_pairs,embedding=embeddings)
+    # vectorstore = FAISS.from_documents(chunks, embeddings)
+    # return vectorstore
+
+
+@st.cache_resource
+def get_llm():
+    return ChatGroq(
+        model="llama-3.3-70b-versatile",
+        groq_api_key=os.getenv("GROQ_API_KEY"),
+        temperature=0.3
     )
 
-    return hybrid
 
+def build_rag_chain(vectorstore, llm):
 
-def build_rag_chain(retriever, llm):
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
     prompt = ChatPromptTemplate.from_template("""
 Answer ONLY using the context below.
@@ -104,28 +95,19 @@ Answer in 2-3 sentences.
 """)
 
     def format_docs(docs):
-        return "\n\n".join([doc.page_content for doc in docs])
+        return "\n\n".join(doc.page_content for doc in docs)
 
-    chain = (
-        {
-            "context": retriever | format_docs,
-            "question": RunnablePassthrough()
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    def rag(query):
+        docs = retriever.invoke(query)
+        context = format_docs(docs)
 
-    return chain
+        chain = prompt | llm | StrOutputParser()
+        return chain.invoke({
+            "context": context,
+            "question": query
+        })
 
-
-@st.cache_resource
-def get_llm():
-    return ChatGroq(
-        model="llama-3.3-70b-versatile",
-        groq_api_key=os.getenv("GROQ_API_KEY"),
-        temperature=0.3
-    )
+    return rag
 
 
 uploaded_file = st.file_uploader(
@@ -139,9 +121,9 @@ if uploaded_file:
     documents = load_document(uploaded_file)
     chunks = chunk_documents(documents)
 
-    retriever = build_retrievers(chunks)
+    vectorstore = build_vectorstore(chunks)
     llm = get_llm()
-    rag_chain = build_rag_chain(retriever, llm)
+    rag = build_rag_chain(vectorstore, llm)
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -158,11 +140,14 @@ if uploaded_file:
         with st.chat_message("user"):
             st.markdown(query)
 
-        rewritten_query = rewrite_query(query, llm)
-
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                answer = rag_chain.invoke(rewritten_query)
+                try:
+                    answer = rag(query)
+                except Exception as e:
+                    answer = "Temporary error. Please try again."
+                    st.error(e)
+
                 st.markdown(answer)
 
         st.session_state.messages.append(
@@ -170,4 +155,4 @@ if uploaded_file:
         )
 
 else:
-    st.info("Please upload a file to start chatting.")
+    st.info("Upload a document to begin.")
